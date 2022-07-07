@@ -15,6 +15,15 @@ using IntState = int;
 #define X(s, i) s[2 * (i)]
 #define Y(s, i) s[2 * (i) + 1]
 
+enum SocialGoal {
+    COOPERATE = 0,
+    CONFLICT,
+    COMPETE,
+    COERCE,
+    EXCHANGE,
+    N_SOCIAL_GOALS,
+};
+
 /**
  * @brief A context for a two-agent grid world game.
  */
@@ -95,6 +104,6 @@ struct Policy {
 };
 
 Policy valueIterateL0(const Context &ctx, int iters, int agent);
-Policy valueIterateL1(const Context &ctx, int iters, int agent, Policy &pi, float chi);
-Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, float chi,
-                      const Context &ctx2, float chi2);
+Policy valueIterateL1(const Context &ctx, int iters, int agent, Policy &pi, SocialGoal xi);
+Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, SocialGoal xi,
+                      const Context &ctx2, std::array<float, N_SOCIAL_GOALS> &pXis);

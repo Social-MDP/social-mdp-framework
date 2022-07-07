@@ -11,14 +11,14 @@
     {
       "goal": 0,
       "level": 2,
-      "chi": 0,
+      "xi": 3,
       "forcePGE": false,
       "forceSGE": false
     },
     {
       "goal": 1,
-      "level": 1,
-      "chi": 1,
+      "level": 2,
+      "xi": 2,
       "forcePGE": false,
       "forceSGE": false
     }

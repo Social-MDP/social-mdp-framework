@@ -23,7 +23,7 @@ template <int N> struct MultiPolicyEstimator {
         auto sum = 0.0f;
         auto temp = begin;
         for (auto i = 0; i < N; i++) {
-            probs[i] *= (*temp++)->prob(s1, s2);
+            probs[i] *= ((*temp++)->prob(s1, s2) + 1e-6);
             sum += probs[i];
         }
         for (auto i = 0; i < N; i++)

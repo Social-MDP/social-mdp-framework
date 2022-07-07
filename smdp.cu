@@ -111,6 +111,55 @@ __host__ __device__ float calculateReward(const Context *ctx, const State &s, in
     return sum;
 }
 
+__host__ __device__ float substituteXiL1(SocialGoal xi, float ri, float rj) {
+    switch (xi) {
+    case COOPERATE:
+        return rj;
+    case CONFLICT:
+    case COMPETE:
+        return -rj;
+    case COERCE:
+        return ri;
+    }
+    return 0.0;
+}
+
+__host__ __device__ float substituteXiL2(SocialGoal xi, SocialGoal xi2, float ri, float Rj,
+                                         float rj, bool sameGoal) {
+    switch (xi) {
+    case COOPERATE:
+        return Rj;
+    case CONFLICT:
+        return -Rj;
+    case COMPETE:
+        switch (xi2) {
+        case COOPERATE:
+        case EXCHANGE:
+            return Rj;
+        case CONFLICT:
+        case COMPETE:
+            return -Rj;
+        case COERCE:
+            return sameGoal ? Rj : -Rj;
+        }
+    case COERCE:
+        switch (xi2) {
+        case COOPERATE:
+        case EXCHANGE:
+            return Rj + ri;
+        case CONFLICT:
+        case COMPETE:
+            return -Rj + ri;
+        case COERCE:
+            return sameGoal ? Rj : -Rj + ri;
+        }
+    case EXCHANGE:
+        if (xi2 == EXCHANGE)
+            return 2 * rj + Rj;
+    }
+    return 0.0;
+}
+
 __host__ __device__ inline float actionCost(int action) { return action == 0 ? 0 : 0.05; }
 
 __global__ void kernelReward(const Context *ctx, float *result, int p) {
@@ -149,7 +198,7 @@ __global__ void kernelValueIterateL0(const Context *ctx, float *next, float *del
 }
 
 __global__ void kernelValueIterateL1(const Context *ctx, float *next, float *delta, float *prev,
-                                     int p, float *pi, float chi) {
+                                     int p, float *pi, SocialGoal xi) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     const auto stride = blockDim.x * gridDim.x;
     const auto pp = anotherAgent(p);
@@ -173,14 +222,16 @@ __global__ void kernelValueIterateL1(const Context *ctx, float *next, float *del
             }
             maxQ = fmax(maxQ, numer / denom - actionCost(a));
         }
-        next[i] = calculateReward(ctx, state, p) + chi * calculateReward(ctx, state, pp) +
-                  ctx->gamma * maxQ;
+        const float ri = calculateReward(ctx, state, p);
+        const float rj = calculateReward(ctx, state, pp);
+        next[i] = calculateReward(ctx, state, p) + substituteXiL1(xi, ri, rj) + ctx->gamma * maxQ;
         delta[i] = fabs(next[i] - prev[i]);
     }
 }
 
 __global__ void kernelValueIterateL2(const Context *ctx, float *next, float *delta, float *prev,
-                                     int p, float *pi, float chi, const Context *ctx2, float chi2) {
+                                     int p, float *pi, SocialGoal xi, const Context *ctx2,
+                                     const float *pXis) {
     const auto index = blockIdx.x * blockDim.x + threadIdx.x;
     const auto stride = blockDim.x * gridDim.x;
     const auto pp = anotherAgent(p);
@@ -204,9 +255,20 @@ __global__ void kernelValueIterateL2(const Context *ctx, float *next, float *del
             }
             maxQ = fmax(maxQ, numer / denom - actionCost(a));
         }
-        next[i] = calculateReward(ctx, state, p) +
-                  chi * (calculateReward(ctx, state, pp) + chi2 * calculateReward(ctx2, state, p)) +
-                  ctx->gamma * maxQ;
+        float Xi = 0;
+        for (auto gi = 0; gi < N_GOALS; gi++) {
+            const float ri = calculateRewardSpecific(ctx, gi, state, p);
+            for (auto gj = 0; gj < N_GOALS; gj++) {
+                const float rj = calculateRewardSpecific(ctx, gj, state, pp);
+                const float ri2 = calculateRewardSpecific(ctx2, gj, state, p);
+                for (auto xi2 = 0; xi2 < N_SOCIAL_GOALS; xi2++) {
+                    const float Rj = substituteXiL1((SocialGoal)xi2, rj, ri2);
+                    Xi += ctx->goals[p][gi] * ctx->goals[pp][gj] * pXis[xi2] *
+                          substituteXiL2(xi, (SocialGoal)xi2, ri, Rj, rj, gi == gj);
+                }
+            }
+        }
+        next[i] = calculateReward(ctx, state, p) + Xi + ctx->gamma * maxQ;
         delta[i] = fabs(next[i] - prev[i]);
     }
 }
@@ -301,7 +363,7 @@ Policy valueIterateL0(const Context &ctx, int iters, int agent) {
     return Policy(ctx, agent, nullptr, devA, fmt::format("l0({},{})", agent, ctx.goals));
 }
 
-Policy valueIterateL1(const Context &ctx, int iters, int agent, Policy &pi, float chi) {
+Policy valueIterateL1(const Context &ctx, int iters, int agent, Policy &pi, SocialGoal xi) {
     pi.ensureOnGpu();
     float *devA = nullptr;
     float *devB = nullptr;
@@ -331,7 +393,7 @@ Policy valueIterateL1(const Context &ctx, int iters, int agent, Policy &pi, floa
     ProgressBar bar{fmt::format("L1 policy for {}: ", agent), "", iters};
     for (int i = 0; i < iters; i++) {
         kernelValueIterateL1<<<nBlocks, blockSize>>>(devCtx, devB, devDelta, devA, agent, pi.onGpu,
-                                                     chi);
+                                                     xi);
         gpuCheck(cudaGetLastError());
 
         cub::DeviceReduce::Max(devTemp, tempSize, devDelta, devMaxDelta, ctx.nStates());
@@ -355,15 +417,16 @@ Policy valueIterateL1(const Context &ctx, int iters, int agent, Policy &pi, floa
     gpuCheck(cudaFree(devMaxDelta));
 
     return Policy(ctx, agent, nullptr, devA,
-                  fmt::format("l1({},{},{},{})", agent, ctx.goals, chi, pi.desc));
+                  fmt::format("l1({},{},{},{})", agent, ctx.goals, xi, pi.desc));
 }
 
-Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, float chi,
-                      const Context &ctx2, float chi2) {
+Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, SocialGoal xi,
+                      const Context &ctx2, std::array<float, N_SOCIAL_GOALS> &pXis) {
     pi.ensureOnGpu();
     float *devA = nullptr;
     float *devB = nullptr;
     float *devDelta = nullptr;
+    float *devPXis = nullptr;
     void *devTemp = nullptr;
     float *devMaxDelta = nullptr;
     Context *devCtx = nullptr;
@@ -378,10 +441,13 @@ Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, floa
     gpuCheck(cudaMalloc((void **)&devA, ctx.nStates() * sizeof(float)));
     gpuCheck(cudaMalloc((void **)&devB, ctx.nStates() * sizeof(float)));
     gpuCheck(cudaMalloc((void **)&devDelta, ctx.nStates() * sizeof(float)));
+    gpuCheck(cudaMalloc((void **)&devPXis, N_SOCIAL_GOALS * sizeof(float)));
     gpuCheck(cudaMalloc((void **)&devCtx, sizeof(Context)));
     gpuCheck(cudaMalloc((void **)&devCtx2, sizeof(Context)));
     gpuCheck(cudaMemcpy(devCtx, &ctx, sizeof(Context), cudaMemcpyHostToDevice));
     gpuCheck(cudaMemcpy(devCtx2, &ctx2, sizeof(Context), cudaMemcpyHostToDevice));
+    gpuCheck(
+        cudaMemcpy(devPXis, pXis.data(), N_SOCIAL_GOALS * sizeof(float), cudaMemcpyHostToDevice));
 
     cub::DeviceReduce::Max(devTemp, tempSize, devDelta, devMaxDelta, ctx.nStates());
     gpuCheck(cudaMalloc((void **)&devTemp, tempSize));
@@ -392,7 +458,7 @@ Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, floa
     ProgressBar bar{fmt::format("L2 policy for {}: ", agent), "", iters};
     for (int i = 0; i < iters; i++) {
         kernelValueIterateL2<<<nBlocks, blockSize>>>(devCtx, devB, devDelta, devA, agent, pi.onGpu,
-                                                     chi, devCtx2, chi2);
+                                                     xi, devCtx2, devPXis);
         gpuCheck(cudaGetLastError());
 
         cub::DeviceReduce::Max(devTemp, tempSize, devDelta, devMaxDelta, ctx.nStates());
@@ -409,6 +475,7 @@ Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, floa
 
     gpuCheck(cudaDeviceSynchronize());
     gpuCheck(cudaFree(devB));
+    gpuCheck(cudaFree(devPXis));
     gpuCheck(cudaFree(devDelta));
     gpuCheck(cudaFree(devCtx));
     gpuCheck(cudaFree(devCtx2));
@@ -416,7 +483,7 @@ Policy valueIterateL2(const Context &ctx, int iters, int agent, Policy &pi, floa
     gpuCheck(cudaFree(devMaxDelta));
 
     return Policy(ctx, agent, nullptr, devA,
-                  fmt::format("l2({},{},{},{},{})", agent, ctx.goals, chi, pi.desc, chi2));
+                  fmt::format("l2({},{},{},{},{})", agent, ctx.goals, xi, pi.desc, pXis));
 }
 
 std::atomic_int unfreedPolicies = 0;
