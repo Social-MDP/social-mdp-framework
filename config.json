@@ -1,0 +1,27 @@
+{
+  "nSides": 10,
+  "nIterations": 50,
+  "gamma": 0.95,
+  "tau": 5,
+  "allGoals": [
+    [1, 2],
+    [1, 6]
+  ],
+  "agents": [
+    {
+      "goal": 0,
+      "level": 2,
+      "chi": 0,
+      "forcePGE": false,
+      "forceSGE": false
+    },
+    {
+      "goal": 1,
+      "level": 1,
+      "chi": 1,
+      "forcePGE": false,
+      "forceSGE": false
+    }
+  ],
+  "initialState": [9, 2, 9, 5, 4, 5, 4, 7]
+}
